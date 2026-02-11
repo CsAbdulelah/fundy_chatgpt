@@ -3,6 +3,7 @@ import TopBar from '../components/TopBar.jsx'
 import LanguageToggle from '../components/LanguageToggle.jsx'
 import {
   createTemplate,
+  getTeams,
   getTemplates,
   updateTemplate,
 } from '../api/client.js'
@@ -20,16 +21,16 @@ const FIELD_TYPES = [
   'file',
 ]
 
-const emptySection = () => ({
+const emptySection = (key) => ({
   id: crypto.randomUUID(),
-  key: '',
+  key,
   title: { en: 'New Section', ar: 'قسم جديد' },
   fields: [],
 })
 
-const emptyField = () => ({
+const emptyField = (key) => ({
   id: crypto.randomUUID(),
-  key: '',
+  key,
   type: 'text',
   required: false,
   label: { en: 'New Field', ar: 'حقل جديد' },
@@ -123,9 +124,31 @@ function normalizeSection(section, index) {
   }
 }
 
+function getNextKey(prefix, existingKeys) {
+  let index = 1
+  let candidate = `${prefix}_${index}`
+  while (existingKeys.has(candidate)) {
+    index += 1
+    candidate = `${prefix}_${index}`
+  }
+  return candidate
+}
+
+function toFriendlyErrorMessage(message, fallbackPrefix) {
+  if (!message) return fallbackPrefix
+  if (message.includes('Undefined column')) {
+    return `${fallbackPrefix}. Database is outdated; run backend migrations.`
+  }
+  if (message.startsWith('Server error')) {
+    return `${fallbackPrefix}. Check backend logs.`
+  }
+  return `${fallbackPrefix}: ${message}`
+}
+
 function normalizeTemplate(rawTemplate) {
   return {
     ...rawTemplate,
+    name_ar: rawTemplate?.name_ar ?? '',
     template_type: rawTemplate?.template_type ?? 'individual',
     sections: Array.isArray(rawTemplate?.sections)
       ? rawTemplate.sections.map((section, index) => normalizeSection(section, index))
@@ -136,6 +159,7 @@ function normalizeTemplate(rawTemplate) {
 function emptyTemplate() {
   return {
     name: '',
+    name_ar: '',
     description: '',
     default_language: 'ar',
     template_type: 'individual',
@@ -146,18 +170,39 @@ function emptyTemplate() {
 export default function GpBuilder() {
   const [language, setLanguage] = useState('en')
   const [templates, setTemplates] = useState([])
+  const [teamId, setTeamId] = useState(devConfig.teamId)
+  const [actorId, setActorId] = useState(devConfig.actorId)
+  const [isContextReady, setIsContextReady] = useState(false)
   const [template, setTemplate] = useState(emptyTemplate())
   const [templateId, setTemplateId] = useState(null)
-  const [selectedTemplateId, setSelectedTemplateId] = useState('new')
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
+  const [activeSectionId, setActiveSectionId] = useState(null)
   const [statusLabel, setStatusLabel] = useState('Loading template...')
   const [saveStatus, setSaveStatus] = useState('')
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
+  const [isCreatingTemplate, setIsCreatingTemplate] = useState(false)
+  const [newTemplateForm, setNewTemplateForm] = useState({
+    name: '',
+    name_ar: '',
+    description: '',
+    template_type: 'individual',
+  })
 
   useEffect(() => {
     let isMounted = true
 
     async function load() {
       try {
-        const loadedTemplates = await getTemplates(devConfig.teamId)
+        const teams = await getTeams()
+        const activeTeam = teams[0]
+        const resolvedTeamId = activeTeam?.id ?? devConfig.teamId
+        const resolvedActorId =
+          activeTeam?.owner_user_id ?? activeTeam?.members?.[0]?.user_id ?? devConfig.actorId
+        setTeamId(resolvedTeamId)
+        setActorId(resolvedActorId)
+        setIsContextReady(Boolean(activeTeam))
+
+        const loadedTemplates = await getTemplates(resolvedTeamId)
         if (loadedTemplates.length > 0) {
           if (!isMounted) return
           setTemplates(loadedTemplates)
@@ -168,13 +213,16 @@ export default function GpBuilder() {
           }))
           setTemplateId(selected.id)
           setSelectedTemplateId(String(selected.id))
+          const firstSection = selected.schema?.sections?.[0]
+          setActiveSectionId(firstSection?.id ?? firstSection?.key ?? null)
           setStatusLabel('Live template')
         } else {
           if (!isMounted) return
           setTemplates([])
           setTemplate(emptyTemplate())
           setTemplateId(null)
-          setSelectedTemplateId('new')
+          setSelectedTemplateId('')
+          setActiveSectionId(null)
           setStatusLabel('No template yet. Start building a new form.')
         }
       } catch (error) {
@@ -182,7 +230,9 @@ export default function GpBuilder() {
         setTemplates([])
         setTemplate(emptyTemplate())
         setTemplateId(null)
-        setSelectedTemplateId('new')
+        setSelectedTemplateId('')
+        setActiveSectionId(null)
+        setIsContextReady(false)
         setStatusLabel('Could not load templates.')
       }
     }
@@ -194,75 +244,121 @@ export default function GpBuilder() {
   }, [])
 
   const handlePublish = async () => {
+    if (!isContextReady) {
+      setSaveStatus('Save failed: team context is not ready')
+      return
+    }
+    if (!templateId) {
+      setSaveStatus('Create a template first.')
+      return
+    }
     try {
       const schema = { sections: template.sections ?? [] }
-      if (templateId) {
-        const updated = await updateTemplate(templateId, {
-          name: template.name || 'Saudi KYC Master',
-          description: template.description || '',
-          default_language: template.default_language || 'ar',
-          template_type: template.template_type || 'individual',
-          schema,
-          actor_id: devConfig.actorId,
-        })
-        setTemplate(normalizeTemplate({
-          ...updated,
-          sections: updated.schema?.sections ?? [],
-        }))
-      } else {
-        const created = await createTemplate({
-          team_id: devConfig.teamId,
-          name: template.name || 'Saudi KYC Master',
-          description: template.description || '',
-          default_language: template.default_language || 'ar',
-          template_type: template.template_type || 'individual',
-          schema,
-          actor_id: devConfig.actorId,
-        })
-        setTemplateId(created.id)
-        setSelectedTemplateId(String(created.id))
-      }
-      const refreshedTemplates = await getTemplates(devConfig.teamId)
+      const updated = await updateTemplate(templateId, {
+        name: template.name || 'Saudi KYC Master',
+        name_ar: template.name_ar || '',
+        description: template.description || '',
+        default_language: template.default_language || 'ar',
+        template_type: template.template_type || 'individual',
+        schema,
+        actor_id: actorId,
+      })
+      setTemplate(normalizeTemplate({
+        ...updated,
+        sections: updated.schema?.sections ?? [],
+      }))
+      const refreshedTemplates = await getTemplates(teamId)
       setTemplates(refreshedTemplates)
       setSaveStatus('Saved')
       setStatusLabel('Published')
     } catch (error) {
-      setSaveStatus(`Save failed: ${error.message}`)
+      setSaveStatus(toFriendlyErrorMessage(error.message, 'Save failed'))
     }
   }
 
   const handleTemplateSwitch = (value) => {
+    if (!value) return
     setSaveStatus('')
-    setSelectedTemplateId(value)
-    if (value === 'new') {
-      setTemplate(emptyTemplate())
-      setTemplateId(null)
-      setStatusLabel('New template draft')
-      return
-    }
-
     const selected = templates.find((item) => String(item.id) === value)
     if (!selected) return
+    setSelectedTemplateId(value)
     setTemplate(normalizeTemplate({
       ...selected,
       sections: selected.schema?.sections ?? [],
     }))
     setTemplateId(selected.id)
+    const firstSection = selected.schema?.sections?.[0]
+    setActiveSectionId(firstSection?.id ?? firstSection?.key ?? null)
     setStatusLabel('Live template')
   }
 
-  const updateTemplateMeta = (key, value) => {
-    setTemplate((prev) => ({
-      ...prev,
-      [key]: value,
-    }))
+  const openCreateTemplateModal = () => {
+    setNewTemplateForm({
+      name: '',
+      name_ar: '',
+      description: '',
+      template_type: 'individual',
+    })
+    setSaveStatus('')
+    setIsCreateModalOpen(true)
+  }
+
+  const closeCreateTemplateModal = () => {
+    if (isCreatingTemplate) return
+    setIsCreateModalOpen(false)
+  }
+
+  const handleCreateTemplateSubmit = async () => {
+    const name = newTemplateForm.name.trim()
+    if (!name) {
+      setSaveStatus('Template name is required.')
+      return
+    }
+    if (!isContextReady) {
+      setSaveStatus('Create failed: team context is not ready')
+      return
+    }
+
+    try {
+      setIsCreatingTemplate(true)
+      const created = await createTemplate({
+        team_id: teamId,
+        name,
+        name_ar: newTemplateForm.name_ar.trim(),
+        description: newTemplateForm.description.trim(),
+        default_language: 'ar',
+        template_type: newTemplateForm.template_type,
+        schema: { sections: [] },
+        actor_id: actorId,
+      })
+      const normalized = normalizeTemplate({
+        ...created,
+        sections: created.schema?.sections ?? [],
+      })
+      const refreshedTemplates = await getTemplates(teamId)
+      setTemplates(refreshedTemplates)
+      setTemplate(normalized)
+      setTemplateId(created.id)
+      setSelectedTemplateId(String(created.id))
+      setActiveSectionId(normalized.sections[0]?.id ?? normalized.sections[0]?.key ?? null)
+      setStatusLabel('Template created. Start building sections and fields.')
+      setSaveStatus('Saved')
+      setIsCreateModalOpen(false)
+    } catch (error) {
+      setSaveStatus(toFriendlyErrorMessage(error.message, 'Create failed'))
+    } finally {
+      setIsCreatingTemplate(false)
+    }
   }
 
   const addSection = () => {
+    const existingKeys = new Set(template.sections.map((item) => item.key))
+    const newSection = emptySection(getNextKey('section', existingKeys))
     setTemplate((prev) => ({
       ...prev,
-      sections: [...prev.sections, emptySection()],
+      sections: [...prev.sections, newSection],
     }))
+    setActiveSectionId(newSection.id ?? newSection.key)
   }
 
   const updateSection = (index, key, value) => {
@@ -283,18 +379,34 @@ export default function GpBuilder() {
   }
 
   const removeSection = (index) => {
+    const removingActive =
+      index >= 0 &&
+      template.sections[index] &&
+      (template.sections[index].id ?? template.sections[index].key) === activeSectionId
+
     setTemplate((prev) => ({
       ...prev,
       sections: prev.sections.filter((_, idx) => idx !== index),
     }))
+
+    if (removingActive) {
+      const remaining = template.sections.filter((_, idx) => idx !== index)
+      setActiveSectionId(remaining[0]?.id ?? remaining[0]?.key ?? null)
+    }
   }
 
   const addField = (sectionIndex) => {
     setTemplate((prev) => {
       const next = [...prev.sections]
+      const existingFieldKeys = new Set(
+        next.flatMap((section) => (section.fields ?? []).map((item) => item.key)),
+      )
       next[sectionIndex] = {
         ...next[sectionIndex],
-        fields: [...next[sectionIndex].fields, emptyField()],
+        fields: [
+          ...next[sectionIndex].fields,
+          emptyField(getNextKey('field', existingFieldKeys)),
+        ],
       }
       return { ...prev, sections: next }
     })
@@ -443,255 +555,222 @@ export default function GpBuilder() {
     })
   }
 
+  useEffect(() => {
+    if (template.sections.length === 0) {
+      if (activeSectionId !== null) setActiveSectionId(null)
+      return
+    }
+
+    const exists = template.sections.some(
+      (section) => (section.id ?? section.key) === activeSectionId,
+    )
+    if (!exists) {
+      const first = template.sections[0]
+      setActiveSectionId(first.id ?? first.key ?? null)
+    }
+  }, [template.sections, activeSectionId])
+
+  const activeSectionIndex = template.sections.findIndex(
+    (section) => (section.id ?? section.key) === activeSectionId,
+  )
+  const resolvedActiveSectionIndex =
+    activeSectionIndex >= 0
+      ? activeSectionIndex
+      : template.sections.length > 0
+        ? 0
+        : -1
+  const activeSection =
+    resolvedActiveSectionIndex >= 0
+      ? template.sections[resolvedActiveSectionIndex]
+      : null
+
+  const getLocalizedText = (value, fallback = '') =>
+    value?.[language] || value?.en || value?.ar || fallback
+
   return (
     <div>
       <TopBar
         title="Form Builder"
         subtitle="Design the bilingual KYC form LPs will complete."
       >
+        <select
+          value={selectedTemplateId}
+          onChange={(event) => handleTemplateSwitch(event.target.value)}
+          style={{
+            minWidth: '280px',
+            padding: '8px 12px',
+            borderRadius: '10px',
+            border: '1px solid #e2d6c6',
+          }}
+        >
+          {templates.length === 0 ? (
+            <option value="">No templates</option>
+          ) : null}
+          {templates.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.name}
+              {item.name_ar ? ` / ${item.name_ar}` : ''}
+              {` (${item.template_type ?? 'individual'})`}
+            </option>
+          ))}
+        </select>
         <LanguageToggle language={language} onChange={setLanguage} />
+        <button className="btn secondary" onClick={openCreateTemplateModal}>
+          Create New Template
+        </button>
         <button className="btn secondary" onClick={addSection}>
           Add Section
         </button>
-        <button className="btn" onClick={handlePublish}>
+        <button className="btn" onClick={handlePublish} disabled={!isContextReady || !templateId}>
           Save Template
         </button>
       </TopBar>
 
       <div className="card">
-        <div className="grid grid-2" style={{ marginBottom: '16px' }}>
-          <div>
-            <label className="field-meta">Template</label>
-            <select
-              value={selectedTemplateId}
-              onChange={(event) => handleTemplateSwitch(event.target.value)}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                borderRadius: '10px',
-                border: '1px solid #e2d6c6',
-                marginTop: '6px',
-              }}
-            >
-              <option value="new">+ Create New Template</option>
-              {templates.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} ({item.template_type ?? 'individual'})
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="field-meta">Template type</label>
-            <select
-              value={template.template_type ?? 'individual'}
-              onChange={(event) => updateTemplateMeta('template_type', event.target.value)}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                borderRadius: '10px',
-                border: '1px solid #e2d6c6',
-                marginTop: '6px',
-              }}
-            >
-              <option value="individual">Individual</option>
-              <option value="institutional">Institutional</option>
-            </select>
-          </div>
-        </div>
-        <div className="grid grid-2" style={{ marginBottom: '16px' }}>
-          <div>
-            <label className="field-meta">Template name</label>
-            <input
-              type="text"
-              value={template.name ?? ''}
-              onChange={(event) => updateTemplateMeta('name', event.target.value)}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                borderRadius: '10px',
-                border: '1px solid #e2d6c6',
-                marginTop: '6px',
-              }}
-            />
-          </div>
-          <div>
-            <label className="field-meta">Description</label>
-            <input
-              type="text"
-              value={template.description ?? ''}
-              onChange={(event) => updateTemplateMeta('description', event.target.value)}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                borderRadius: '10px',
-                border: '1px solid #e2d6c6',
-                marginTop: '6px',
-              }}
-            />
-          </div>
+        <div className="field-meta" style={{ marginBottom: '10px' }}>
+          Template: {template.name || 'Not selected'}
+          {template.name_ar ? ` / ${template.name_ar}` : ''}
+          {` · Type: ${template.template_type || '-'}`}
         </div>
         <p className="card-subtitle">
           {statusLabel}
           {saveStatus ? ` · ${saveStatus}` : ''}
         </p>
-        <div className="grid">
-          {template.sections.map((section, sectionIndex) => (
-            <div
-              className="section-card"
-              key={section.id ?? section.key}
-              draggable
-              onDragStart={(event) => {
-                event.dataTransfer.setData('text/plain', `section:${sectionIndex}`)
-              }}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault()
-                const payload = event.dataTransfer.getData('text/plain')
-                if (payload.startsWith('section:')) {
-                  const fromIndex = Number(payload.split(':')[1])
-                  if (!Number.isNaN(fromIndex) && fromIndex !== sectionIndex) {
-                    moveSection(fromIndex, sectionIndex)
-                  }
-                }
-              }}
-            >
-              <div className="section-header">
-                <div>
-                  <div className="field-meta">Section key</div>
-                  <input
-                    type="text"
-                    value={section.key ?? ''}
-                    onChange={(event) =>
-                      updateSection(sectionIndex, 'key', event.target.value)
-                    }
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      borderRadius: '10px',
-                      border: '1px solid #e2d6c6',
-                      marginTop: '6px',
-                    }}
-                  />
-                </div>
-                <div className="action-row">
+        <div className="builder-workspace">
+          <aside className="builder-sidebar">
+            <div className="field-meta" style={{ marginBottom: '8px' }}>
+              Sections ({template.sections.length})
+            </div>
+            <div className="section-nav-list">
+              {template.sections.map((section, sectionIndex) => {
+                const sectionToken = section.id ?? section.key
+                const isActive = sectionToken === (activeSection?.id ?? activeSection?.key)
+                return (
                   <button
-                    className="btn secondary"
-                    onClick={() => addField(sectionIndex)}
-                  >
-                    Add Field
-                  </button>
-                  <button
-                    className="btn ghost"
-                    onClick={() => removeSection(sectionIndex)}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </div>
-              <div className="grid grid-2" style={{ marginTop: '12px' }}>
-                <div>
-                  <label className="field-meta">Title (EN)</label>
-                  <input
-                    type="text"
-                    value={section.title?.en ?? ''}
-                    onChange={(event) =>
-                      updateSection(sectionIndex, 'title', {
-                        ...(section.title ?? {}),
-                        en: event.target.value,
-                      })
-                    }
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      borderRadius: '10px',
-                      border: '1px solid #e2d6c6',
-                      marginTop: '6px',
-                    }}
-                  />
-                </div>
-                <div>
-                  <label className="field-meta">Title (AR)</label>
-                  <input
-                    type="text"
-                    className="arabic"
-                    value={section.title?.ar ?? ''}
-                    onChange={(event) =>
-                      updateSection(sectionIndex, 'title', {
-                        ...(section.title ?? {}),
-                        ar: event.target.value,
-                      })
-                    }
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      borderRadius: '10px',
-                      border: '1px solid #e2d6c6',
-                      marginTop: '6px',
-                    }}
-                  />
-                </div>
-              </div>
-              <div className="grid" style={{ marginTop: '12px' }}>
-                {section.fields.map((field, fieldIndex) => (
-                  <div
-                    className="builder-field"
-                    key={field.id ?? field.key}
+                    type="button"
+                    key={sectionToken}
+                    className={`section-nav-item ${isActive ? 'active' : ''}`}
+                    onClick={() => setActiveSectionId(sectionToken)}
                     draggable
                     onDragStart={(event) => {
-                      event.dataTransfer.setData(
-                        'text/plain',
-                        `field:${sectionIndex}:${fieldIndex}`,
-                      )
+                      event.dataTransfer.setData('text/plain', `section:${sectionIndex}`)
                     }}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => {
                       event.preventDefault()
                       const payload = event.dataTransfer.getData('text/plain')
-                      if (payload.startsWith('field:')) {
-                        const [, fromSection, fromIndex] = payload.split(':')
-                        const fromSectionIndex = Number(fromSection)
-                        const fromFieldIndex = Number(fromIndex)
-                        if (
-                          fromSectionIndex === sectionIndex &&
-                          !Number.isNaN(fromFieldIndex) &&
-                          fromFieldIndex !== fieldIndex
-                        ) {
-                          moveField(sectionIndex, fromFieldIndex, fieldIndex)
-                        }
-                      }
+                      if (!payload.startsWith('section:')) return
+                      const fromIndex = Number(payload.split(':')[1])
+                      if (Number.isNaN(fromIndex) || fromIndex === sectionIndex) return
+                      const movedToken =
+                        template.sections[fromIndex]?.id ?? template.sections[fromIndex]?.key
+                      moveSection(fromIndex, sectionIndex)
+                      setActiveSectionId(movedToken ?? null)
                     }}
                   >
+                    <span className="section-nav-title">
+                      {getLocalizedText(section.title, 'Untitled section')}
+                    </span>
+                    <span className="section-nav-meta">
+                      {section.fields?.length ?? 0} fields
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </aside>
+
+          <div className="builder-main">
+            {activeSection ? (
+              <div className="section-card">
+                <div className="section-header">
+                  <div className="field-meta">Active section</div>
+                  <div className="action-row">
+                    <button
+                      className="btn secondary"
+                      onClick={() => addField(resolvedActiveSectionIndex)}
+                    >
+                      Add Field
+                    </button>
+                    <button
+                      className="btn ghost"
+                      onClick={() => removeSection(resolvedActiveSectionIndex)}
+                    >
+                      Remove Section
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-2" style={{ marginTop: '12px' }}>
+                  <div>
+                    <label className="field-meta">Title (EN)</label>
+                    <input
+                      type="text"
+                      value={activeSection.title?.en ?? ''}
+                      onChange={(event) =>
+                        updateSection(resolvedActiveSectionIndex, 'title', {
+                          ...(activeSection.title ?? {}),
+                          en: event.target.value,
+                        })
+                      }
+                      style={{
+                        width: '100%',
+                        padding: '8px 10px',
+                        borderRadius: '10px',
+                        border: '1px solid #e2d6c6',
+                        marginTop: '6px',
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label className="field-meta">Title (AR)</label>
+                    <input
+                      type="text"
+                      className="arabic"
+                      value={activeSection.title?.ar ?? ''}
+                      onChange={(event) =>
+                        updateSection(resolvedActiveSectionIndex, 'title', {
+                          ...(activeSection.title ?? {}),
+                          ar: event.target.value,
+                        })
+                      }
+                      style={{
+                        width: '100%',
+                        padding: '8px 10px',
+                        borderRadius: '10px',
+                        border: '1px solid #e2d6c6',
+                        marginTop: '6px',
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid" style={{ marginTop: '12px' }}>
+                  {(activeSection.fields ?? []).map((field, fieldIndex) => (
+                    <div
+                      className="builder-field"
+                      key={field.id ?? field.key}
+                      draggable
+                      onDragStart={(event) => {
+                        event.dataTransfer.setData('text/plain', `field:${fieldIndex}`)
+                      }}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        const payload = event.dataTransfer.getData('text/plain')
+                        if (!payload.startsWith('field:')) return
+                        const fromFieldIndex = Number(payload.split(':')[1])
+                        if (Number.isNaN(fromFieldIndex) || fromFieldIndex === fieldIndex) return
+                        moveField(resolvedActiveSectionIndex, fromFieldIndex, fieldIndex)
+                      }}
+                    >
                     <div className="grid grid-2">
-                      <div>
-                        <label className="field-meta">Field key</label>
-                        <input
-                          type="text"
-                          value={field.key ?? ''}
-                          onChange={(event) =>
-                            updateField(
-                              sectionIndex,
-                              fieldIndex,
-                              'key',
-                              event.target.value,
-                            )
-                          }
-                          style={{
-                            width: '100%',
-                            padding: '8px 10px',
-                            borderRadius: '10px',
-                            border: '1px solid #e2d6c6',
-                            marginTop: '6px',
-                          }}
-                        />
-                      </div>
                       <div>
                         <label className="field-meta">Type</label>
                         <select
                           value={field.type}
                           onChange={(event) =>
                             updateField(
-                              sectionIndex,
+                              resolvedActiveSectionIndex,
                               fieldIndex,
                               'type',
                               event.target.value,
@@ -719,7 +798,7 @@ export default function GpBuilder() {
                           value={field.label?.en ?? ''}
                           onChange={(event) =>
                             updateField(
-                              sectionIndex,
+                              resolvedActiveSectionIndex,
                               fieldIndex,
                               'label',
                               {
@@ -745,7 +824,7 @@ export default function GpBuilder() {
                           value={field.label?.ar ?? ''}
                           onChange={(event) =>
                             updateField(
-                              sectionIndex,
+                              resolvedActiveSectionIndex,
                               fieldIndex,
                               'label',
                               {
@@ -769,7 +848,7 @@ export default function GpBuilder() {
                           value={field.required ? 'yes' : 'no'}
                           onChange={(event) =>
                             updateField(
-                              sectionIndex,
+                              resolvedActiveSectionIndex,
                               fieldIndex,
                               'required',
                               event.target.value === 'yes',
@@ -794,10 +873,10 @@ export default function GpBuilder() {
                             <OptionList
                               items={field.options?.en ?? []}
                               onAdd={(value) =>
-                                addOption(sectionIndex, fieldIndex, 'en', value)
+                                addOption(resolvedActiveSectionIndex, fieldIndex, 'en', value)
                               }
                               onRemove={(index) =>
-                                removeOption(sectionIndex, fieldIndex, 'en', index)
+                                removeOption(resolvedActiveSectionIndex, fieldIndex, 'en', index)
                               }
                             />
                           </div>
@@ -806,10 +885,10 @@ export default function GpBuilder() {
                             <OptionList
                               items={field.options?.ar ?? []}
                               onAdd={(value) =>
-                                addOption(sectionIndex, fieldIndex, 'ar', value)
+                                addOption(resolvedActiveSectionIndex, fieldIndex, 'ar', value)
                               }
                               onRemove={(index) =>
-                                removeOption(sectionIndex, fieldIndex, 'ar', index)
+                                removeOption(resolvedActiveSectionIndex, fieldIndex, 'ar', index)
                               }
                             />
                           </div>
@@ -823,7 +902,7 @@ export default function GpBuilder() {
                               items={field.matrix?.rows?.en ?? []}
                               onAdd={(value) =>
                                 addMatrixItem(
-                                  sectionIndex,
+                                  resolvedActiveSectionIndex,
                                   fieldIndex,
                                   'rows',
                                   'en',
@@ -832,7 +911,7 @@ export default function GpBuilder() {
                               }
                               onRemove={(index) =>
                                 removeMatrixItem(
-                                  sectionIndex,
+                                  resolvedActiveSectionIndex,
                                   fieldIndex,
                                   'rows',
                                   'en',
@@ -847,7 +926,7 @@ export default function GpBuilder() {
                               items={field.matrix?.rows?.ar ?? []}
                               onAdd={(value) =>
                                 addMatrixItem(
-                                  sectionIndex,
+                                  resolvedActiveSectionIndex,
                                   fieldIndex,
                                   'rows',
                                   'ar',
@@ -856,7 +935,7 @@ export default function GpBuilder() {
                               }
                               onRemove={(index) =>
                                 removeMatrixItem(
-                                  sectionIndex,
+                                  resolvedActiveSectionIndex,
                                   fieldIndex,
                                   'rows',
                                   'ar',
@@ -870,7 +949,9 @@ export default function GpBuilder() {
                             <div className="action-row" style={{ marginTop: '8px' }}>
                               <button
                                 className="btn secondary"
-                                onClick={() => addMatrixColumn(sectionIndex, fieldIndex)}
+                                onClick={() =>
+                                  addMatrixColumn(resolvedActiveSectionIndex, fieldIndex)
+                                }
                               >
                                 Add Column
                               </button>
@@ -887,7 +968,7 @@ export default function GpBuilder() {
                                         value={column.label?.en ?? ''}
                                         onChange={(event) =>
                                           updateMatrixColumn(
-                                            sectionIndex,
+                                            resolvedActiveSectionIndex,
                                             fieldIndex,
                                             columnIndex,
                                             'label',
@@ -907,7 +988,7 @@ export default function GpBuilder() {
                                         value={column.label?.ar ?? ''}
                                         onChange={(event) =>
                                           updateMatrixColumn(
-                                            sectionIndex,
+                                            resolvedActiveSectionIndex,
                                             fieldIndex,
                                             columnIndex,
                                             'label',
@@ -926,7 +1007,7 @@ export default function GpBuilder() {
                                         value={column.type ?? 'text'}
                                         onChange={(event) =>
                                           updateMatrixColumn(
-                                            sectionIndex,
+                                            resolvedActiveSectionIndex,
                                             fieldIndex,
                                             columnIndex,
                                             'type',
@@ -951,7 +1032,7 @@ export default function GpBuilder() {
                                               value.trim(),
                                             ].filter(Boolean)
                                             updateMatrixColumnOptions(
-                                              sectionIndex,
+                                              resolvedActiveSectionIndex,
                                               fieldIndex,
                                               columnIndex,
                                               'en',
@@ -963,7 +1044,7 @@ export default function GpBuilder() {
                                               (_, idx) => idx !== index,
                                             )
                                             updateMatrixColumnOptions(
-                                              sectionIndex,
+                                              resolvedActiveSectionIndex,
                                               fieldIndex,
                                               columnIndex,
                                               'en',
@@ -982,7 +1063,7 @@ export default function GpBuilder() {
                                               value.trim(),
                                             ].filter(Boolean)
                                             updateMatrixColumnOptions(
-                                              sectionIndex,
+                                              resolvedActiveSectionIndex,
                                               fieldIndex,
                                               columnIndex,
                                               'ar',
@@ -994,7 +1075,7 @@ export default function GpBuilder() {
                                               (_, idx) => idx !== index,
                                             )
                                             updateMatrixColumnOptions(
-                                              sectionIndex,
+                                              resolvedActiveSectionIndex,
                                               fieldIndex,
                                               columnIndex,
                                               'ar',
@@ -1010,7 +1091,7 @@ export default function GpBuilder() {
                                       className="btn ghost"
                                       onClick={() =>
                                         removeMatrixColumn(
-                                          sectionIndex,
+                                          resolvedActiveSectionIndex,
                                           fieldIndex,
                                           columnIndex,
                                         )
@@ -1058,18 +1139,110 @@ export default function GpBuilder() {
                     <div className="action-row" style={{ marginTop: '10px' }}>
                       <button
                         className="btn ghost"
-                        onClick={() => removeField(sectionIndex, fieldIndex)}
+                        onClick={() => removeField(resolvedActiveSectionIndex, fieldIndex)}
                       >
                         Remove Field
                       </button>
                     </div>
                   </div>
-                ))}
+                  ))}
+                </div>
+
+                {(activeSection.fields ?? []).length === 0 ? (
+                  <div className="field-meta" style={{ marginTop: '10px' }}>
+                    No fields in this section yet.
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ))}
+            ) : (
+              <div className="section-card">
+                <div className="field-meta">No sections yet. Click Add Section.</div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {isCreateModalOpen ? (
+        <div className="modal-backdrop" onClick={closeCreateTemplateModal}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3 style={{ margin: 0 }}>Create Template</h3>
+              <button className="btn ghost" onClick={closeCreateTemplateModal}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="grid" style={{ gap: '12px' }}>
+                <label>
+                  <span className="field-meta">Template name</span>
+                  <input
+                    className="input"
+                    type="text"
+                    value={newTemplateForm.name}
+                    onChange={(event) =>
+                      setNewTemplateForm((prev) => ({ ...prev, name: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span className="field-meta">Description</span>
+                  <input
+                    className="input"
+                    type="text"
+                    value={newTemplateForm.description}
+                    onChange={(event) =>
+                      setNewTemplateForm((prev) => ({
+                        ...prev,
+                        description: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span className="field-meta">Template name (AR)</span>
+                  <input
+                    className="input arabic"
+                    type="text"
+                    value={newTemplateForm.name_ar}
+                    onChange={(event) =>
+                      setNewTemplateForm((prev) => ({ ...prev, name_ar: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span className="field-meta">Template type</span>
+                  <select
+                    className="input"
+                    value={newTemplateForm.template_type}
+                    onChange={(event) =>
+                      setNewTemplateForm((prev) => ({
+                        ...prev,
+                        template_type: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="individual">Individual</option>
+                    <option value="institutional">Institutional</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn ghost" onClick={closeCreateTemplateModal}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                onClick={handleCreateTemplateSubmit}
+                disabled={isCreatingTemplate}
+              >
+                {isCreatingTemplate ? 'Creating...' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

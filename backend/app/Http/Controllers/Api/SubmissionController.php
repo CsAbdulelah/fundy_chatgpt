@@ -7,6 +7,7 @@ use App\Models\KycInvite;
 use App\Models\KycSubmission;
 use App\Services\PdfRenderer;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 
 class SubmissionController extends Controller
 {
@@ -27,7 +28,7 @@ class SubmissionController extends Controller
             $query->where('investor_user_id', $request->input('investor_user_id'));
         }
 
-        return $query->with('comments')->get();
+        return $query->with(['comments', 'investor:id,name'])->get();
     }
 
     public function store(Request $request)
@@ -96,5 +97,36 @@ class SubmissionController extends Controller
         $path = $renderer->renderSubmission($submission, $language);
 
         return response()->download($path, 'submission-' . $submission->id . '.pdf');
+    }
+
+    public function uploadFile(Request $request, KycSubmission $submission)
+    {
+        $request->validate([
+            'file' => ['required', 'file', 'max:10240'],
+        ]);
+
+        $storedPath = $request->file('file')->store('submissions/' . $submission->id);
+
+        return response()->json([
+            'name' => $request->file('file')->getClientOriginalName(),
+            'path' => $storedPath,
+            'mime' => $request->file('file')->getClientMimeType(),
+            'size' => $request->file('file')->getSize(),
+            'url' => url('/api/submissions/' . $submission->id . '/file?path=' . urlencode($storedPath)),
+        ]);
+    }
+
+    public function file(Request $request, KycSubmission $submission)
+    {
+        $path = $request->query('path');
+        if (! is_string($path) || ! str_starts_with($path, 'submissions/' . $submission->id . '/')) {
+            abort(404);
+        }
+
+        if (! Storage::exists($path)) {
+            abort(404);
+        }
+
+        return Storage::response($path);
     }
 }

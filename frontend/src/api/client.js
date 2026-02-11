@@ -1,5 +1,31 @@
 const baseUrl = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '')
 
+function extractErrorMessage(response, rawText) {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = JSON.parse(rawText)
+      if (typeof payload?.message === 'string' && payload.message.trim()) {
+        return payload.message
+      }
+      if (payload?.errors && typeof payload.errors === 'object') {
+        const firstError = Object.values(payload.errors)[0]
+        if (Array.isArray(firstError) && firstError[0]) {
+          return String(firstError[0])
+        }
+      }
+    } catch {
+      // ignore parse issue and fallback below
+    }
+  }
+
+  if (rawText && rawText.trim().startsWith('<!DOCTYPE html')) {
+    return `Server error (${response.status}). Check backend logs.`
+  }
+
+  return rawText || `Request failed: ${response.status}`
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     headers: {
@@ -11,7 +37,7 @@ async function request(path, options = {}) {
 
   if (!response.ok) {
     const text = await response.text()
-    throw new Error(text || `Request failed: ${response.status}`)
+    throw new Error(extractErrorMessage(response, text))
   }
 
   if (response.status === 204) {
@@ -167,6 +193,23 @@ export async function uploadBrandingAsset(file, type) {
   if (!response.ok) {
     const text = await response.text()
     throw new Error(text || `Request failed: ${response.status}`)
+  }
+
+  return response.json()
+}
+
+export async function uploadSubmissionFile(submissionId, file) {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await fetch(`${baseUrl}/submissions/${submissionId}/files/upload`, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(extractErrorMessage(response, text))
   }
 
   return response.json()

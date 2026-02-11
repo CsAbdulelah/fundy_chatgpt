@@ -33,6 +33,8 @@ Route::prefix('submissions')->group(function () {
     Route::get('/', [SubmissionController::class, 'index']);
     Route::post('/', [SubmissionController::class, 'store']);
     Route::patch('{submission}', [SubmissionController::class, 'update']);
+    Route::post('{submission}/files/upload', [SubmissionController::class, 'uploadFile']);
+    Route::get('{submission}/file', [SubmissionController::class, 'file']);
     Route::post('{submission}/submit', [SubmissionController::class, 'submit']);
     Route::post('{submission}/resubmit', [SubmissionController::class, 'resubmit']);
     Route::post('{submission}/reject', [ReviewController::class, 'reject']);

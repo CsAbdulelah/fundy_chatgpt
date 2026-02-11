@@ -34,6 +34,7 @@ class TemplateController extends Controller
         $data = $request->validate([
             'team_id' => ['required', 'exists:teams,id'],
             'name' => ['required', 'string', 'max:255'],
+            'name_ar' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
             'default_language' => ['nullable', 'string'],
             'template_type' => ['nullable', 'in:individual,institutional'],
@@ -46,6 +47,7 @@ class TemplateController extends Controller
         $template = KycTemplate::create([
             'team_id' => $data['team_id'],
             'name' => $data['name'],
+            'name_ar' => $data['name_ar'] ?? null,
             'description' => $data['description'] ?? null,
             'default_language' => $data['default_language'] ?? 'ar',
             'template_type' => $data['template_type'] ?? 'individual',
@@ -68,6 +70,7 @@ class TemplateController extends Controller
     {
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
+            'name_ar' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
             'default_language' => ['nullable', 'string'],
             'template_type' => ['nullable', 'in:individual,institutional'],

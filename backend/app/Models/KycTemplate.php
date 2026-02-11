@@ -12,6 +12,7 @@ class KycTemplate extends Model
     protected $fillable = [
         'team_id',
         'name',
+        'name_ar',
         'description',
         'default_language',
         'template_type',

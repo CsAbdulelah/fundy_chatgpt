@@ -7,9 +7,80 @@ import {
   getSubmissions,
   getTemplates,
   submitSubmission,
+  uploadSubmissionFile,
   updateSubmission,
 } from '../api/client.js'
 import { devConfig } from '../data/devConfig.js'
+
+function getFieldDataKey(section, field) {
+  const sectionKey = section?.key ?? section?.id ?? 'section'
+  const fieldKey = field?.key ?? field?.id ?? 'field'
+  return `${sectionKey}::${fieldKey}`
+}
+
+function buildLocalizedOptions(options, language) {
+  if (Array.isArray(options)) {
+    return options.map((label, index) => ({
+      key: `opt_${index + 1}`,
+      label,
+      aliases: [label, `opt_${index + 1}`],
+    }))
+  }
+
+  const en = Array.isArray(options?.en) ? options.en : []
+  const ar = Array.isArray(options?.ar) ? options.ar : []
+  const size = Math.max(en.length, ar.length)
+  return Array.from({ length: size }, (_, index) => {
+    const key = `opt_${index + 1}`
+    const enLabel = en[index] ?? ''
+    const arLabel = ar[index] ?? ''
+    return {
+      key,
+      label: language === 'ar' ? arLabel || enLabel : enLabel || arLabel,
+      aliases: [key, enLabel, arLabel].filter(Boolean),
+    }
+  })
+}
+
+function resolveOptionKey(value, optionItems) {
+  if (value === null || value === undefined || value === '') return ''
+  const textValue = String(value)
+  const found = optionItems.find((item) => item.aliases.includes(textValue))
+  return found?.key ?? textValue
+}
+
+function resolveOptionLabel(value, optionItems) {
+  if (value === null || value === undefined || value === '') return '-'
+  const key = resolveOptionKey(value, optionItems)
+  const found = optionItems.find((item) => item.key === key)
+  return found?.label ?? String(value)
+}
+
+function buildMatrixRows(matrixRows, language) {
+  const en = Array.isArray(matrixRows?.en) ? matrixRows.en : []
+  const ar = Array.isArray(matrixRows?.ar) ? matrixRows.ar : []
+  const size = Math.max(en.length, ar.length)
+  return Array.from({ length: size }, (_, index) => {
+    const key = `row_${index + 1}`
+    const enLabel = en[index] ?? ''
+    const arLabel = ar[index] ?? ''
+    return {
+      key,
+      label: language === 'ar' ? arLabel || enLabel : enLabel || arLabel,
+      aliases: [key, enLabel, arLabel].filter(Boolean),
+    }
+  })
+}
+
+function getMatrixCellValue(matrixValue, rowAliases, columnKey) {
+  for (const rowKey of rowAliases) {
+    const rowData = matrixValue?.[rowKey]
+    if (rowData && Object.prototype.hasOwnProperty.call(rowData, columnKey)) {
+      return rowData[columnKey]
+    }
+  }
+  return ''
+}
 
 export default function LpForm() {
   const [language, setLanguage] = useState('ar')
@@ -19,6 +90,12 @@ export default function LpForm() {
   const [statusLabel, setStatusLabel] = useState('Loading...')
   const [formData, setFormData] = useState({})
   const [templateId, setTemplateId] = useState(null)
+  const [activeSectionId, setActiveSectionId] = useState(null)
+  const lockedStatuses = new Set(['submitted', 'approved', 'in_approval_chain', 'final_approved'])
+  const terminalStatuses = new Set(['approved', 'final_approved'])
+  const submissionStatus = submission?.status ?? statusLabel
+  const isReadOnly = submission ? lockedStatuses.has(submissionStatus) : false
+  const canStartNewSubmission = Boolean(templateId) && terminalStatuses.has(submission?.status)
 
   useEffect(() => {
     let isMounted = true
@@ -46,10 +123,16 @@ export default function LpForm() {
         setSchema(chosenTemplate.schema ?? { sections: [] })
         setTemplateId(chosenTemplate.id ?? null)
         if (submissions.length > 0) {
-          setSubmission(submissions[0])
-          setFormData(submissions[0].data || {})
-          setStatusLabel(submissions[0].status)
+          const ordered = [...submissions].sort((a, b) => b.id - a.id)
+          const editable =
+            ordered.find((item) => item.status === 'draft' || item.status === 'changes_requested') ??
+            ordered[0]
+          setSubmission(editable)
+          setFormData(editable.data || {})
+          setStatusLabel(editable.status)
         } else {
+          setSubmission(null)
+          setFormData({})
           setStatusLabel('Draft not created')
         }
       } catch (error) {
@@ -69,6 +152,7 @@ export default function LpForm() {
   }, [investorType])
 
   const handleChange = (key, value) => {
+    if (isReadOnly) return
     setFormData((prev) => ({ ...prev, [key]: value }))
   }
 
@@ -81,12 +165,13 @@ export default function LpForm() {
 
   const formatValue = (value) => {
     if (Array.isArray(value)) return value.join(', ')
-    if (value && typeof value === 'object') return '✓'
+    if (value && typeof value === 'object') return value.name ?? '✓'
     if (value === null || value === undefined || value === '') return '-'
     return String(value)
   }
 
   const toggleMulti = (key, option) => {
+    if (isReadOnly) return
     setFormData((prev) => {
       const current = Array.isArray(prev[key]) ? prev[key] : []
       const next = current.includes(option)
@@ -97,6 +182,7 @@ export default function LpForm() {
   }
 
   const toggleMatrix = (key, row, col, value) => {
+    if (isReadOnly) return
     setFormData((prev) => {
       const current = prev[key] && typeof prev[key] === 'object' ? prev[key] : {}
       const rowData = current[row] || {}
@@ -110,10 +196,39 @@ export default function LpForm() {
     const draft = await createSubmission({
       template_id: templateId,
       investor_user_id: devConfig.investorId,
-      data: formData,
+      data: {},
     })
     setSubmission(draft)
+    setFormData(draft.data || {})
     setStatusLabel(draft.status)
+  }
+
+  const ensureDraftSubmission = async () => {
+    if (submission) return submission
+    if (!templateId) return null
+    const draft = await createSubmission({
+      template_id: templateId,
+      investor_user_id: devConfig.investorId,
+      data: {},
+    })
+    setSubmission(draft)
+    setFormData(draft.data || {})
+    setStatusLabel(draft.status)
+    return draft
+  }
+
+  const handleFileChange = async (fieldKey, file) => {
+    if (!file || isReadOnly) return
+    try {
+      const current = await ensureDraftSubmission()
+      if (!current) return
+      setStatusLabel('Uploading file...')
+      const uploaded = await uploadSubmissionFile(current.id, file)
+      handleChange(fieldKey, uploaded)
+      setStatusLabel(current.status ?? 'draft')
+    } catch (error) {
+      setStatusLabel(`Upload failed: ${error.message}`)
+    }
   }
 
   const handleSubmit = async () => {
@@ -125,6 +240,46 @@ export default function LpForm() {
   }
 
   const sections = schema.sections || []
+  const activeSectionIndex = sections.findIndex(
+    (section) => (section.id ?? section.key) === activeSectionId,
+  )
+  const resolvedActiveSectionIndex =
+    activeSectionIndex >= 0 ? activeSectionIndex : sections.length > 0 ? 0 : -1
+  const activeSection =
+    resolvedActiveSectionIndex >= 0 ? sections[resolvedActiveSectionIndex] : null
+
+  useEffect(() => {
+    if (sections.length === 0) {
+      setActiveSectionId(null)
+      return
+    }
+    const exists = sections.some((section) => (section.id ?? section.key) === activeSectionId)
+    if (!exists) {
+      setActiveSectionId(sections[0].id ?? sections[0].key)
+    }
+  }, [activeSectionId, sections])
+
+  const isFilledValue = (value) => {
+    if (Array.isArray(value)) return value.length > 0
+    if (value && typeof value === 'object') return Object.keys(value).length > 0
+    return !(value === null || value === undefined || value === '')
+  }
+
+  const getSectionProgress = (section) => {
+    const fields = section.fields || []
+    if (fields.length === 0) return { done: 0, total: 0 }
+    const done = fields.filter((field) => {
+      const scopedKey = getFieldDataKey(section, field)
+      const legacyKey = field.key ?? field.id
+      return isFilledValue(formData[scopedKey] ?? formData[legacyKey])
+    }).length
+    return { done, total: fields.length }
+  }
+
+  const getCommentsForField = (fieldKey, legacyKey) =>
+    (submission?.comments ?? []).filter(
+      (comment) => comment.field_key === fieldKey || comment.field_key === legacyKey,
+    )
 
   return (
     <div>
@@ -147,9 +302,19 @@ export default function LpForm() {
         </select>
         <LanguageToggle language={language} onChange={setLanguage} />
         {submission ? (
+          canStartNewSubmission ? (
+            <button className="btn" onClick={handleCreateDraft}>
+              Start New Submission
+            </button>
+          ) : isReadOnly ? (
+            <button className="btn" disabled>
+              Under Review
+            </button>
+          ) : (
           <button className="btn" onClick={handleSubmit}>
             Submit Updates
           </button>
+          )
         ) : (
           <button className="btn" onClick={handleCreateDraft} disabled={!templateId}>
             Create Draft
@@ -157,26 +322,62 @@ export default function LpForm() {
         )}
       </TopBar>
 
-      <div className="grid">
-        {sections.length === 0 ? (
-          <SectionCard title={language === 'ar' ? 'لا يوجد نموذج' : 'No form available'}>
-            <div className="field-meta">
-              {language === 'ar'
-                ? 'بانتظار قيام GP بنشر نموذج KYC.'
-                : 'Waiting for GP to publish a KYC form template.'}
-            </div>
-          </SectionCard>
-        ) : null}
-        {sections.map((section) => (
-          <SectionCard
-            key={section.id ?? section.key}
-            title={getLocalized(section.title) ?? section.title}
-          >
-            {(section.fields || []).map((field) => {
-              const fieldKey = field.key ?? field.id
+      <div className="builder-workspace">
+        <aside className="builder-sidebar">
+          <div className="field-meta" style={{ marginBottom: '8px' }}>
+            {language === 'ar' ? 'الأقسام' : 'Sections'} ({sections.length})
+          </div>
+          <div className="section-nav-list">
+            {sections.map((section) => {
+              const token = section.id ?? section.key
+              const isActive = token === (activeSection?.id ?? activeSection?.key)
+              const progress = getSectionProgress(section)
+              return (
+                <button
+                  type="button"
+                  key={token}
+                  className={`section-nav-item ${isActive ? 'active' : ''}`}
+                  onClick={() => setActiveSectionId(token)}
+                >
+                  <span className="section-nav-title">
+                    {getLocalized(section.title) ?? section.title}
+                  </span>
+                  <span className="section-nav-meta">
+                    {progress.done}/{progress.total} {language === 'ar' ? 'مكتمل' : 'filled'}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </aside>
+
+        <div className="builder-main">
+          {isReadOnly ? (
+            <SectionCard title={language === 'ar' ? 'قيد المراجعة' : 'Under Review'}>
+              <div className="field-meta">
+                {language === 'ar'
+                  ? 'تم إرسال النموذج وهو الآن قيد مراجعة GP. لا يمكنك تعديل البيانات حتى يتم طلب تعديلات.'
+                  : 'Your submission is under GP review. Editing is locked until changes are requested.'}
+              </div>
+            </SectionCard>
+          ) : null}
+          {sections.length === 0 ? (
+            <SectionCard title={language === 'ar' ? 'لا يوجد نموذج' : 'No form available'}>
+              <div className="field-meta">
+                {language === 'ar'
+                  ? 'بانتظار قيام GP بنشر نموذج KYC.'
+                  : 'Waiting for GP to publish a KYC form template.'}
+              </div>
+            </SectionCard>
+          ) : null}
+          {activeSection ? (
+            <SectionCard title={getLocalized(activeSection.title) ?? activeSection.title}>
+              {(activeSection.fields || []).map((field) => {
+              const fieldKey = getFieldDataKey(activeSection, field)
+              const legacyFieldKey = field.key ?? field.id
               const label = getLocalized(field.label) ?? field.label
-              const options = getLocalized(field.options) ?? []
-              const matrixRows = getLocalized(field.matrix?.rows) ?? []
+              const optionItems = buildLocalizedOptions(field.options, language)
+              const matrixRows = buildMatrixRows(field.matrix?.rows, language)
               const rawColumns =
                 Array.isArray(field.matrix?.columns)
                   ? field.matrix?.columns ?? []
@@ -201,8 +402,28 @@ export default function LpForm() {
               const fieldType =
                 field.type ||
                 (matrixRows.length || matrixColumns.length ? 'matrix' : '') ||
-                (Array.isArray(options) && options.length ? 'select' : 'text')
+                (optionItems.length ? 'select' : 'text')
               const isMatrix = fieldType === 'matrix'
+              const fieldComments = getCommentsForField(fieldKey, legacyFieldKey)
+              const fieldValue = formData[fieldKey] ?? formData[legacyFieldKey]
+              const normalizedSelectValue =
+                fieldType === 'select'
+                  ? resolveOptionKey(fieldValue, optionItems)
+                  : fieldValue
+              const normalizedMultiValue =
+                fieldType === 'checkbox'
+                  ? (Array.isArray(fieldValue) ? fieldValue : []).map((value) =>
+                      resolveOptionKey(value, optionItems),
+                    )
+                  : []
+              const currentValueLabel =
+                fieldType === 'select'
+                  ? resolveOptionLabel(fieldValue, optionItems)
+                  : fieldType === 'checkbox'
+                    ? normalizedMultiValue
+                        .map((value) => resolveOptionLabel(value, optionItems))
+                        .join(', ') || '-'
+                    : formatValue(fieldValue)
               return (
                 <div
                   key={fieldKey}
@@ -213,50 +434,58 @@ export default function LpForm() {
                       {label}
                     </div>
                     <div className="field-meta">
-                      Current value: {formatValue(formData[fieldKey])}
+                      Current value: {currentValueLabel}
                     </div>
+                    {fieldComments.length > 0 ? (
+                      <div className="field-meta">
+                        GP comment: {fieldComments.map((item) => item.comment).join(' | ')}
+                      </div>
+                    ) : null}
                   </div>
                   <div className={isMatrix ? 'matrix-wrapper' : ''}>
                     {fieldType === 'textarea' ? (
                       <textarea
                         rows={3}
-                        value={formData[fieldKey] ?? ''}
+                        value={fieldValue ?? ''}
                         onChange={(event) =>
                           handleChange(fieldKey, event.target.value)
                         }
+                        disabled={isReadOnly}
                         placeholder={language === 'ar' ? 'أدخل التحديث' : 'Enter update'}
                         className="input"
                       />
                     ) : fieldType === 'select' ? (
                       <select
                         className="input"
-                        value={formData[fieldKey] ?? ''}
+                        value={normalizedSelectValue ?? ''}
                         onChange={(event) =>
                           handleChange(fieldKey, event.target.value)
                         }
+                        disabled={isReadOnly}
                       >
                         <option value="">
                           {language === 'ar' ? 'اختر' : 'Select'}
                         </option>
-                        {options.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
+                        {optionItems.map((option) => (
+                          <option key={option.key} value={option.key}>
+                            {option.label}
                           </option>
                         ))}
                       </select>
                     ) : fieldType === 'checkbox' ? (
                       <div className="choice-row">
-                        {options.map((option) => (
-                          <label key={option} className="choice">
+                        {optionItems.map((option) => (
+                          <label key={option.key} className="choice">
                             <input
                               type="checkbox"
+                              disabled={isReadOnly}
                               checked={
-                                Array.isArray(formData[fieldKey]) &&
-                                formData[fieldKey].includes(option)
+                                Array.isArray(normalizedMultiValue) &&
+                                normalizedMultiValue.includes(option.key)
                               }
-                              onChange={() => toggleMulti(fieldKey, option)}
+                              onChange={() => toggleMulti(fieldKey, option.key)}
                             />
-                            {option}
+                            {option.label}
                           </label>
                         ))}
                       </div>
@@ -276,26 +505,36 @@ export default function LpForm() {
                           </div>
                         ))}
                         {matrixRows.map((row) => (
-                          <Fragment key={row}>
-                            <div className="matrix-cell header">{row}</div>
+                          <Fragment key={row.key}>
+                            <div className="matrix-cell header">{row.label}</div>
                             {matrixColumns.map((col) => {
-                              const cellValue = formData[fieldKey]?.[row]?.[col.key]
+                              const columnOptions = buildLocalizedOptions(col.options, language)
+                              const rawCellValue = getMatrixCellValue(
+                                fieldValue,
+                                row.aliases,
+                                col.key,
+                              )
+                              const cellValue =
+                                col.type === 'select'
+                                  ? resolveOptionKey(rawCellValue, columnOptions)
+                                  : rawCellValue
                               return (
-                                <label key={`${row}-${col.key}`} className="matrix-cell">
+                                <label key={`${row.key}-${col.key}`} className="matrix-cell">
                                   {col.type === 'select' ? (
                                     <select
                                       className="input"
                                       value={cellValue ?? ''}
+                                      disabled={isReadOnly}
                                       onChange={(event) =>
-                                        toggleMatrix(fieldKey, row, col.key, event.target.value)
+                                        toggleMatrix(fieldKey, row.key, col.key, event.target.value)
                                       }
                                     >
                                       <option value="">
                                         {language === 'ar' ? 'اختر' : 'Select'}
                                       </option>
-                                      {(getLocalized(col.options) ?? []).map((opt) => (
-                                        <option key={opt} value={opt}>
-                                          {opt}
+                                      {columnOptions.map((opt) => (
+                                        <option key={opt.key} value={opt.key}>
+                                          {opt.label}
                                         </option>
                                       ))}
                                     </select>
@@ -304,8 +543,9 @@ export default function LpForm() {
                                       type="text"
                                       className="input"
                                       value={cellValue ?? ''}
+                                      disabled={isReadOnly}
                                       onChange={(event) =>
-                                        toggleMatrix(fieldKey, row, col.key, event.target.value)
+                                        toggleMatrix(fieldKey, row.key, col.key, event.target.value)
                                       }
                                     />
                                   )}
@@ -318,19 +558,24 @@ export default function LpForm() {
                     ) : (
                       <input
                         type={field.type === 'number' ? 'number' : field.type === 'email' ? 'email' : field.type === 'date' ? 'date' : field.type === 'file' ? 'file' : 'text'}
-                        value={field.type === 'file' ? undefined : formData[fieldKey] ?? ''}
+                        value={field.type === 'file' ? undefined : fieldValue ?? ''}
                         onChange={(event) =>
-                          handleChange(
-                            fieldKey,
-                            field.type === 'file'
-                              ? event.target.files?.[0]?.name ?? ''
-                              : event.target.value,
-                          )
+                          field.type === 'file'
+                            ? handleFileChange(fieldKey, event.target.files?.[0])
+                            : handleChange(fieldKey, event.target.value)
                         }
+                        disabled={isReadOnly}
                         placeholder={language === 'ar' ? 'أدخل التحديث' : 'Enter update'}
                         className="input"
                       />
                     )}
+                    {field.type === 'file' && fieldValue?.url ? (
+                      <div className="field-meta" style={{ marginTop: '6px' }}>
+                        <a href={fieldValue.url} target="_blank" rel="noreferrer">
+                          {language === 'ar' ? 'معاينة الملف' : 'Preview file'}
+                        </a>
+                      </div>
+                    ) : null}
                   </div>
                   {!isMatrix ? (
                     <div>
@@ -342,8 +587,9 @@ export default function LpForm() {
                 </div>
               )
             })}
-          </SectionCard>
-        ))}
+            </SectionCard>
+          ) : null}
+        </div>
       </div>
     </div>
   )
