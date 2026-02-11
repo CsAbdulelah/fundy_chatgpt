@@ -36,8 +36,11 @@ export function createTeam(payload) {
   })
 }
 
-export function getTemplates(teamId) {
+export function getTemplates(teamId, { templateType } = {}) {
   const query = new URLSearchParams({ team_id: String(teamId) })
+  if (templateType) {
+    query.set('template_type', templateType)
+  }
   return request(`/templates?${query.toString()}`)
 }
 

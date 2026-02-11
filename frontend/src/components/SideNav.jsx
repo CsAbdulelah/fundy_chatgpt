@@ -10,15 +10,12 @@ const links = [
 export default function SideNav() {
   return (
     <aside className="app-sidebar">
-      <div className="profile-card">
-        <div className="profile-row">
-          <div className="profile-avatar">SA</div>
-          <div>
-            <div className="profile-name">Sarah Smither</div>
-            <div className="profile-email">sarahsmith@mail.com</div>
-          </div>
+      <div className="brand">
+        <div className="brand-badge" />
+        <div>
+          <div className="brand-title">KYC Flow Studio</div>
+          <div className="card-subtitle">Saudi Arabia · Funds</div>
         </div>
-        <button className="btn primary full">+ Create Form</button>
       </div>
       <nav className="sidebar-nav">
         {links.map((link) => (
@@ -34,8 +31,11 @@ export default function SideNav() {
         ))}
       </nav>
       <div className="sidebar-footer">
-        <div className="card-title">Help Center</div>
-        <div className="card-subtitle">Need anything? We are here.</div>
+        <div className="card-title">Team Workspace</div>
+        <div className="card-subtitle">Assign permissions per reviewer.</div>
+        <div className="action-row">
+          <button className="btn secondary">Invite Member</button>
+        </div>
       </div>
     </aside>
   )

@@ -14,6 +14,7 @@ class KycTemplate extends Model
         'name',
         'description',
         'default_language',
+        'template_type',
         'is_active',
         'schema',
         'branding',

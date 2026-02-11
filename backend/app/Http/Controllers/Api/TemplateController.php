@@ -17,9 +17,16 @@ class TemplateController extends Controller
     {
         $request->validate([
             'team_id' => ['required', 'exists:teams,id'],
+            'template_type' => ['nullable', 'in:individual,institutional'],
         ]);
 
-        return KycTemplate::where('team_id', $request->input('team_id'))->get();
+        $query = KycTemplate::where('team_id', $request->input('team_id'));
+
+        if ($request->filled('template_type')) {
+            $query->where('template_type', $request->input('template_type'));
+        }
+
+        return $query->orderByDesc('updated_at')->get();
     }
 
     public function store(Request $request)
@@ -29,6 +36,7 @@ class TemplateController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
             'default_language' => ['nullable', 'string'],
+            'template_type' => ['nullable', 'in:individual,institutional'],
             'is_active' => ['nullable', 'boolean'],
             'schema' => ['required', 'array'],
             'branding' => ['nullable', 'array'],
@@ -40,6 +48,7 @@ class TemplateController extends Controller
             'name' => $data['name'],
             'description' => $data['description'] ?? null,
             'default_language' => $data['default_language'] ?? 'ar',
+            'template_type' => $data['template_type'] ?? 'individual',
             'is_active' => $data['is_active'] ?? true,
             'schema' => $data['schema'],
             'branding' => $data['branding'] ?? null,
@@ -61,6 +70,7 @@ class TemplateController extends Controller
             'name' => ['sometimes', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
             'default_language' => ['nullable', 'string'],
+            'template_type' => ['nullable', 'in:individual,institutional'],
             'is_active' => ['nullable', 'boolean'],
             'schema' => ['nullable', 'array'],
             'branding' => ['nullable', 'array'],

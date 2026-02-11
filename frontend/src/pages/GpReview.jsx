@@ -2,11 +2,9 @@ import { useEffect, useState } from 'react'
 import TopBar from '../components/TopBar.jsx'
 import LanguageToggle from '../components/LanguageToggle.jsx'
 import SectionCard from '../components/SectionCard.jsx'
-import { mockSubmission } from '../data/mock.js'
 import {
   approveSubmission,
   downloadSubmissionPdfWithLanguage,
-  getDefaultSchema,
   getSubmissions,
   getTemplates,
   rejectSubmission,
@@ -15,10 +13,13 @@ import { devConfig } from '../data/devConfig.js'
 
 export default function GpReview() {
   const [language, setLanguage] = useState('en')
-  const [schema, setSchema] = useState({ sections: mockSubmission.sections })
+  const [templateType, setTemplateType] = useState('individual')
+  const [templates, setTemplates] = useState([])
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
+  const [schema, setSchema] = useState({ sections: [] })
   const [submission, setSubmission] = useState(null)
   const [commentMap, setCommentMap] = useState({})
-  const [statusLabel, setStatusLabel] = useState('Using mock data')
+  const [statusLabel, setStatusLabel] = useState('Loading...')
   const [pdfLanguage, setPdfLanguage] = useState('en')
   const [isPreviewing, setIsPreviewing] = useState(false)
 
@@ -27,14 +28,26 @@ export default function GpReview() {
 
     async function load() {
       try {
-        const templates = await getTemplates(devConfig.teamId)
-        const defaultSchema = await getDefaultSchema()
-        const chosenTemplate = templates[0]
-        const submissions = await getSubmissions({
-          templateId: chosenTemplate?.id,
+        const loadedTemplates = await getTemplates(devConfig.teamId, {
+          templateType,
         })
         if (!isMounted) return
-        setSchema(defaultSchema)
+        setTemplates(loadedTemplates)
+        const chosenTemplate =
+          loadedTemplates.find((item) => String(item.id) === selectedTemplateId) ??
+          loadedTemplates[0]
+        if (!chosenTemplate) {
+          setSchema({ sections: [] })
+          setSubmission(null)
+          setSelectedTemplateId('')
+          setStatusLabel(`No ${templateType} template yet`)
+          return
+        }
+        setSelectedTemplateId(String(chosenTemplate.id))
+        const submissions = await getSubmissions({
+          templateId: chosenTemplate.id,
+        })
+        setSchema(chosenTemplate.schema ?? { sections: [] })
         if (submissions.length > 0) {
           setSubmission(submissions[0])
           setStatusLabel(submissions[0].status)
@@ -43,12 +56,11 @@ export default function GpReview() {
         }
       } catch (error) {
         if (!isMounted) return
-        setSchema({ sections: mockSubmission.sections })
-        setSubmission({
-          id: mockSubmission.id,
-          investorName: mockSubmission.investorName,
-          data: {},
-        })
+        setTemplates([])
+        setSelectedTemplateId('')
+        setSchema({ sections: [] })
+        setSubmission(null)
+        setStatusLabel('Could not load submissions')
       }
     }
 
@@ -56,7 +68,7 @@ export default function GpReview() {
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [templateType, selectedTemplateId])
 
   const handleCommentChange = (key, value) => {
     setCommentMap((prev) => ({ ...prev, [key]: value }))
@@ -103,13 +115,50 @@ export default function GpReview() {
   }
 
   const sections = schema.sections || []
+  const investorLabel =
+    submission?.investor_name ??
+    (submission?.investor_user_id
+      ? `Investor ${submission.investor_user_id}`
+      : 'No investor')
 
   return (
     <div>
       <TopBar
         title="GP Review"
-        subtitle={`Submission ${submission?.id ?? mockSubmission.id} · ${mockSubmission.investorName}`}
+        subtitle={`Submission ${submission?.id ?? '-'} · ${investorLabel}`}
       >
+        <select
+          value={templateType}
+          onChange={(event) => setTemplateType(event.target.value)}
+          style={{
+            padding: '8px 12px',
+            borderRadius: '10px',
+            border: '1px solid #e2d6c6',
+          }}
+        >
+          <option value="individual">Individual</option>
+          <option value="institutional">Institutional</option>
+        </select>
+        <select
+          value={selectedTemplateId}
+          onChange={(event) => setSelectedTemplateId(event.target.value)}
+          style={{
+            padding: '8px 12px',
+            borderRadius: '10px',
+            border: '1px solid #e2d6c6',
+          }}
+          disabled={templates.length === 0}
+        >
+          {templates.length === 0 ? (
+            <option value="">No templates</option>
+          ) : (
+            templates.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))
+          )}
+        </select>
         <LanguageToggle language={language} onChange={setLanguage} />
         <select
           value={pdfLanguage}
@@ -135,6 +184,15 @@ export default function GpReview() {
       </TopBar>
 
       <div className="grid">
+        {sections.length === 0 ? (
+          <SectionCard title={language === 'ar' ? 'لا يوجد نموذج' : 'No form available'}>
+            <div className="field-meta">
+              {language === 'ar'
+                ? 'بانتظار نموذج أو إرسال جديد للمراجعة.'
+                : 'Waiting for a published template or submitted KYC to review.'}
+            </div>
+          </SectionCard>
+        ) : null}
         {sections.map((section) => (
           <SectionCard key={section.id ?? section.key} title={section.title?.[language] ?? section.title}>
             {(section.fields || []).map((field) => {

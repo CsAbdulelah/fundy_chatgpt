@@ -8,8 +8,39 @@ use Illuminate\Http\Request;
 
 class TeamController extends Controller
 {
+    private function ensureDemoTeam(): void
+    {
+        if (Team::query()->exists()) {
+            return;
+        }
+
+        $user = \App\Models\User::query()->first();
+        if (! $user) {
+            $user = \App\Models\User::query()->create([
+                'name' => 'GP Admin',
+                'email' => 'gp@example.com',
+                'password' => 'password',
+            ]);
+        }
+
+        $team = Team::query()->create([
+            'name' => 'GP Team',
+            'owner_user_id' => $user->id,
+            'timezone' => 'Asia/Riyadh',
+            'default_language' => 'ar',
+        ]);
+
+        \App\Models\TeamMember::query()->create([
+            'team_id' => $team->id,
+            'user_id' => $user->id,
+            'role_name' => 'gp_admin',
+            'permissions' => ['templates' => true, 'review' => true],
+        ]);
+    }
+
     public function index()
     {
+        $this->ensureDemoTeam();
         return Team::with('members.user')->get();
     }
 
