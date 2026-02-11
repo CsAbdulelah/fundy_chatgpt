@@ -5,18 +5,27 @@
 ```bash
 docker compose up --build
 ```
-
-### First-time setup
-
-```bash
-docker compose run --rm backend cp .env.docker .env
-docker compose run --rm backend php artisan key:generate
-docker compose run --rm backend php artisan migrate
-```
+The backend container now auto-runs:
+- `.env` bootstrap (`.env.docker` fallback)
+- `php artisan key:generate` (if missing)
+- `php artisan migrate`
 
 Open:
 - Frontend: http://localhost:5173
 - Backend: http://localhost:8000/api
+
+### Common commands
+
+```bash
+# start in background
+docker compose up -d --build
+
+# stop
+docker compose down
+
+# reset database volume
+docker compose down -v
+```
 
 ## Local (without Docker)
 
